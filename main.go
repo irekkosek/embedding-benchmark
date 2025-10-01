@@ -55,6 +55,7 @@ func main() {
 					start := time.Now()
 					_, err := emb.GenerateEmbeddings(ctx, []embedding.EmbeddingPayload{{Data: text, ID: int64(j.id)}})
 					if err == nil {
+						fmt.Printf("GenerateEmbeddings error: %v\n", err)
 						processed.Add(1)
 						tookMs := float64(time.Since(start).Microseconds()) / 1000.0
 						durationsMu.Lock()
