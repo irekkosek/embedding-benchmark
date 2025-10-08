@@ -4,7 +4,6 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"github.com/marosiak/embedding-benchmark/embedding"
 	"math"
 	"net/http"
 	"os"
@@ -13,6 +12,9 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/marosiak/embedding-benchmark/embedding"
+	"go.uber.org/zap"
 )
 
 type job struct {
@@ -39,6 +41,31 @@ func main() {
 	var processed atomic.Int64
 	var wg sync.WaitGroup
 
+	logger, err := zap.NewProduction()
+	if err != nil {
+		panic(fmt.Sprintf("cannot initialize zap logger: %v", err))
+	}
+	defer logger.Sync()
+
+	logger.Info("benchmark started", zap.String("model", *model), zap.Int("workers", *workers), zap.Duration("duration", *duration))
+
+	// Progress reporter goroutine (uses zap)
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		start := time.Now()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				count := processed.Load()
+				elapsed := time.Since(start)
+				logger.Info("progress", zap.Int64("processed", count), zap.String("elapsed", elapsed.Truncate(time.Second).String()))
+			}
+		}
+	}()
+
 	for w := 0; w < *workers; w++ {
 		wg.Add(1)
 		go func() {
@@ -61,7 +88,7 @@ func main() {
 						durations = append(durations, tookMs)
 						durationsMu.Unlock()
 					} else {
-						fmt.Printf("GenerateEmbeddings error: %v and ctx err: %v\n", err, ctx)
+						logger.Error("GenerateEmbeddings error", zap.Error(err), zap.String("ctxErr", fmt.Sprintf("%v", ctx.Err())))
 						if ctx.Err() != nil {
 							return
 						}
@@ -94,20 +121,20 @@ func main() {
 
 	wg.Wait()
 	totalDur := time.Since(startAll)
-	fmt.Println("processed all", "took", totalDur, "amount", processed.Load())
+	logger.Info("final progress", zap.Int64("processed", processed.Load()), zap.String("elapsed", totalDur.Truncate(time.Second).String()))
 
 	durationsMu.Lock()
 	stats := computeStats(durations)
 	durationsMu.Unlock()
 
 	if stats.count > 0 {
-		fmt.Printf("min %.2f ms | avg %.2f ms | max %.2f ms\n", stats.min, stats.mean, stats.max)
-		fmt.Printf("p50 %.2f ms | p90 %.2f ms | p95 %.2f ms | p99 %.2f ms\n", stats.p50, stats.p90, stats.p95, stats.p99)
-		fmt.Printf("stddev %.2f ms\n", stats.stddev)
+		logger.Info("summary", zap.Float64("min_ms", stats.min), zap.Float64("avg_ms", stats.mean), zap.Float64("max_ms", stats.max))
+		logger.Info("percentiles", zap.Float64("p50_ms", stats.p50), zap.Float64("p90_ms", stats.p90), zap.Float64("p95_ms", stats.p95), zap.Float64("p99_ms", stats.p99))
+		logger.Info("stddev", zap.Float64("stddev_ms", stats.stddev))
 		rps := float64(processed.Load()) / totalDur.Seconds()
-		fmt.Printf("throughput %.2f req/s\n", rps)
+		logger.Info("throughput", zap.Float64("req_per_sec", rps))
 	} else {
-		fmt.Println("no successful samples collected")
+		logger.Warn("no successful samples collected")
 	}
 }
 
